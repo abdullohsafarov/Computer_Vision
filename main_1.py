@@ -6,11 +6,13 @@ import re
 import sys
 import numpy as np
 from dotenv import load_dotenv
+from tkinter import filedialog, simpledialog, messagebox, Tk
+import tkinter as tk
 
 load_dotenv()
 
 LM_STUDIO_URL = os.getenv("LM_STUDIO_URL", "http://localhost:1234/v1/chat/completions")
-MODEL_NAME    = os.getenv("MODEL_NAME", "local-model")
+MODEL_NAME    = os.getenv("MODEL_NAME", "llava-v1.6-mistral-7b:2")
 
 SYSTEM_PROMPT = """You are an image processing assistant. Parse the user's command and return ONLY a JSON object — no markdown, no explanation, no extra text.
 
@@ -127,26 +129,48 @@ def apply_operation(img: np.ndarray, cmd: dict) -> np.ndarray:
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python main.py <image_path>")
-        sys.exit(1)
-
-    image_path = sys.argv[1]
+    # Create hidden root window for file dialog
+    root = Tk()
+    root.withdraw()
+    
+    # Open file picker dialog
+    image_path = filedialog.askopenfilename(
+        title="Выберите фото / Select Image",
+        filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")]
+    )
+    
+    if not image_path:
+        messagebox.showwarning("Info", "No image selected / Фото не выбрано")
+        return
+    
     img = cv2.imread(image_path)
     if img is None:
-        print(f"[!] Cannot open image: {image_path}")
-        sys.exit(1)
-
+        messagebox.showerror("Error", f"Cannot open image / Не могу открыть: {image_path}")
+        return
+    
+    messagebox.showinfo("Success", f"Loaded / Загружено:\n{image_path}\n({img.shape[1]}x{img.shape[0]})")
+    
     print(f"[+] Loaded: {image_path}  ({img.shape[1]}x{img.shape[0]})")
     print("Commands: rotate [angle], resize [WxH], red channel, grayscale, blur [kernel]")
     print("Type 'exit' to quit.\n")
 
     current = img.copy()
+    cv2.imshow("Original Image", img)
 
     while True:
-        user_input = input("Command: ").strip()
+        user_input = simpledialog.askstring(
+            "Image Processing",
+            "Введите команду / Enter command:\nrotate, resize, red channel, grayscale, blur\n(or 'exit' to quit)"
+        )
+        
+        if user_input is None:  # Cancel button
+            break
+            
+        user_input = user_input.strip()
+        
         if user_input.lower() in ("exit", "quit", "q"):
             break
+            
         if not user_input:
             continue
 
@@ -155,20 +179,23 @@ def main():
         print(f"[*] Parsed: {cmd}")
 
         if cmd.get("op") == "unknown":
+            messagebox.showwarning("Warning", "Could not understand command / Не понял команду")
             print("[!] Could not understand the command.\n")
             continue
 
         current = apply_operation(current, cmd)
 
-        out_path = "output.jpg"
+        out_path = os.path.join(os.path.dirname(image_path), "output.jpg")
         cv2.imwrite(out_path, current)
+        messagebox.showinfo("Success", f"Saved / Сохранено:\n{out_path}")
         print(f"[+] Saved → {out_path}\n")
 
         cv2.imshow("Result", current)
         cv2.waitKey(1)
 
     cv2.destroyAllWindows()
-    print("Bye.")
+    root.destroy()
+    print("Bye / До свидания.")
 
 
 if __name__ == "__main__":
