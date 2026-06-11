@@ -2,6 +2,7 @@ import cv2
 import requests
 import json
 import os
+import re
 import sys
 import numpy as np
 from dotenv import load_dotenv
@@ -11,23 +12,60 @@ load_dotenv()
 LM_STUDIO_URL = os.getenv("LM_STUDIO_URL", "http://localhost:1234/v1/chat/completions")
 MODEL_NAME    = os.getenv("MODEL_NAME", "local-model")
 
-SYSTEM_PROMPT = """You are an image processing assistant. Parse the user's command and return ONLY a JSON object (no markdown, no explanation).
+SYSTEM_PROMPT = """You are an image processing assistant. Parse the user's command and return ONLY a JSON object — no markdown, no explanation, no extra text.
 
-Supported operations and their JSON format:
+Supported operations:
 
-1. rotate     → {"op": "rotate", "angle": <int>}
-2. resize     → {"op": "resize", "width": <int>, "height": <int>}
+1. rotate      → {"op": "rotate", "angle": <int>}
+2. resize      → {"op": "resize", "width": <int>, "height": <int>}
 3. red_channel → {"op": "red_channel"}
-4. grayscale  → {"op": "grayscale"}
-5. blur       → {"op": "blur", "kernel": <odd_int>}
+4. grayscale   → {"op": "grayscale"}
+5. blur        → {"op": "blur", "kernel": <odd_int>}
+
+Defaults when a parameter is missing:
+- rotate with no angle → use 90
+- blur with no kernel  → use 5
+- resize with no size  → use width 640, height 480
+
+Keywords to recognize (any language):
+- rotate / поверни / повернуть / вращать          → rotate
+- resize / измени размер / масштаб / разрешение   → resize
+- red / красный / красная компонента              → red_channel
+- gray / grey / серый / чёрно-белый / grayscale   → grayscale
+- blur / размытие / размыть / блур                → blur
 
 Rules:
-- Return ONLY the JSON object.
-- If the command is unclear, return {"op": "unknown"}.
-- For rotate, extract the angle in degrees (e.g. "90", "180", "-45").
-- For blur, kernel must be an odd integer (e.g. 5, 7, 15). Default: 5.
-- For resize, extract width and height in pixels.
+- Return ONLY the JSON object, nothing else.
+- If you cannot match any operation, return {"op": "unknown"}.
 """
+
+
+def keyword_fallback(text: str) -> dict:
+    """Simple keyword matcher as fallback when LLM fails or returns unknown."""
+    t = text.lower()
+
+    if any(w in t for w in ("rotate", "поверн", "вращ")):
+        nums = re.findall(r"-?\d+", t)
+        angle = int(nums[0]) if nums else 90
+        return {"op": "rotate", "angle": angle}
+
+    if any(w in t for w in ("resize", "размер", "масштаб", "разрешени")):
+        nums = re.findall(r"\d+", t)
+        w, h = (int(nums[0]), int(nums[1])) if len(nums) >= 2 else (640, 480)
+        return {"op": "resize", "width": w, "height": h}
+
+    if any(w in t for w in ("red", "красн")):
+        return {"op": "red_channel"}
+
+    if any(w in t for w in ("gray", "grey", "серый", "чёрно", "черно", "grayscale")):
+        return {"op": "grayscale"}
+
+    if any(w in t for w in ("blur", "размыт", "блур")):
+        nums = re.findall(r"\d+", t)
+        k = int(nums[0]) if nums else 5
+        return {"op": "blur", "kernel": k}
+
+    return {"op": "unknown"}
 
 
 def parse_command(user_input: str) -> dict:
@@ -43,12 +81,14 @@ def parse_command(user_input: str) -> dict:
         resp = requests.post(LM_STUDIO_URL, json=payload, timeout=30)
         resp.raise_for_status()
         text = resp.json()["choices"][0]["message"]["content"].strip()
-        # strip possible markdown fences
         text = text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
+        result = json.loads(text)
+        if result.get("op") == "unknown":
+            return keyword_fallback(user_input)
+        return result
     except Exception as e:
         print(f"[LLM error] {e}")
-        return {"op": "unknown"}
+        return keyword_fallback(user_input)
 
 
 def apply_operation(img: np.ndarray, cmd: dict) -> np.ndarray:
@@ -68,17 +108,17 @@ def apply_operation(img: np.ndarray, cmd: dict) -> np.ndarray:
 
     elif op == "red_channel":
         result = np.zeros_like(img)
-        result[:, :, 2] = img[:, :, 2]   # OpenCV: BGR, so red = channel 2
+        result[:, :, 2] = img[:, :, 2]   # OpenCV BGR: red = channel 2
         return result
 
     elif op == "grayscale":
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)  # keep 3 channels for saving
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
     elif op == "blur":
         k = cmd.get("kernel", 5)
         if k % 2 == 0:
-            k += 1                         # kernel must be odd
+            k += 1
         return cv2.GaussianBlur(img, (k, k), 0)
 
     else:
@@ -98,7 +138,7 @@ def main():
         sys.exit(1)
 
     print(f"[+] Loaded: {image_path}  ({img.shape[1]}x{img.shape[0]})")
-    print("Supported commands: rotate, resize, red channel, grayscale, blur")
+    print("Commands: rotate [angle], resize [WxH], red channel, grayscale, blur [kernel]")
     print("Type 'exit' to quit.\n")
 
     current = img.copy()
@@ -112,7 +152,7 @@ def main():
 
         print("[*] Sending to LLM...")
         cmd = parse_command(user_input)
-        print(f"[*] Parsed command: {cmd}")
+        print(f"[*] Parsed: {cmd}")
 
         if cmd.get("op") == "unknown":
             print("[!] Could not understand the command.\n")
